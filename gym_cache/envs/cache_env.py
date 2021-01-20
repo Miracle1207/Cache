@@ -3,6 +3,7 @@ import numpy as np
 import random
 from gym import error, spaces, utils
 from gym.utils import seeding
+from gym_cache.envs.cache_method import CacheMethod
 
 class CacheEnv(gym.Env):
   metadata = {'render.modes': ['human']}
@@ -15,8 +16,7 @@ class CacheEnv(gym.Env):
     self.each_user_task_n = 1  # the number of requested task by each user
     self.users_tasks = np.zeros(shape=(self.user_n, self.each_user_task_n))
     for i in range(self.user_n):  # initial users_tasks randomly
-      self.users_tasks[i] = self.Zipf_sample(self.task, self.each_user_task_n)
-
+      self.users_tasks[i] = CacheMethod.Zipf_sample(task_set=self.task, num=self.each_user_task_n)
     self.edge_n = 3  # the number of agent(edge server)
     self.each_edge_cache_n = 3  # the number of caching tasks by each edge server
     # state : the set of each edge servers' caching tasks
@@ -43,6 +43,11 @@ class CacheEnv(gym.Env):
     self.viewer = None  # whether open the visual tool
     self.steps_beyond_done = None  # current step = 0
     self.cache_task_flag = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
+    '''
+    cache method 5 needs:
+    '''
+    for i in range(self.edge_n):
+      self.agent_store_task = self.users_tasks[i:self.each_edge_cache_n+i]
 
   @property
   def observation_space(self):
@@ -50,7 +55,8 @@ class CacheEnv(gym.Env):
 
   @property
   def action_space(self):
-    return [spaces.Discrete(np.power(2, self.user_n)) for i in range(self.edge_n)]
+    return [spaces.Discrete(np.power(2, self.user_n)*(self.task_n+1)) for i in range(self.edge_n)]
+    #return [i for i in range(np.power(2, self.user_n)*(self.task_n+1))]
 
   @property
   def agents(self):
@@ -73,10 +79,12 @@ class CacheEnv(gym.Env):
     sinr = np.zeros(self.user_n)
     sum_hxp = 0
     for i in range(self.user_n):
-      hxp = np.power(abs(h[i]*x[i]*self.p), 2)
+      #hxp = np.power(abs(h[i]*x[i]*self.p), 2)
+      hxp = x[i]*np.power(h[i], 2)*self.p
       sum_hxp += hxp
     for i in range(self.user_n):
-      sinr[i] = np.power(abs(h[i]*x[i]*self.p), 2)/(sum_hxp - np.power(abs(h[i]*x[i]*self.p), 2) + self.compute_noise(self.user_n))
+      #sinr[i] = np.power(abs(h[i]*x[i]*self.p), 2)/(sum_hxp - np.power(abs(h[i]*x[i]*self.p), 2) + self.compute_noise(self.user_n))
+      sinr[i] = x[i]*np.power(h[i], 2)*self.p/(sum_hxp - x[i]*np.power(h[i], 2)*self.p + np.power(self.compute_noise(self.user_n), 2))
     return sinr
   '''
   compute downlink rate
@@ -97,35 +105,51 @@ class CacheEnv(gym.Env):
     sample_task = random.sample(task_set, num)
     return sample_task
   '''
-  sample a task according to Zipf distribution
-  task_set: the set we sample from
-  num: the number of sampled tasks
+  env_wrapper
   '''
-  def Zipf_sample(self, task_set, num):
-    # probability distribution
-    task_num = len(task_set)
-    p = np.zeros(task_num)
-    for i in range(task_num):
-      p[i] = int(0.1/(i+1)*100000)
-    sampled_task = []
-    for j in range(num):
-      # sample & return index
-      start = 0
-      index = 0
-      randnum = random.randint(1, sum(p))
-      for index, scope in enumerate(p):
-        start += scope
-        if randnum <= start:
-          break
-      sampled_task.append(index)
-    return sampled_task
+  def action_wrapper(self, acs):
+    acs = acs[0]
+    ac_str = []
+    ac = np.zeros(shape=(len(acs), self.user_n))
+    for i in range(len(acs)):
+      action = list(acs[i]).index(1)
+      ac_str.append(bin(action).lstrip('0b'))
+      for j in range(len(ac_str[i])):
+        ac[i][4 - j] = int(ac_str[i][len(ac_str[i]) - 1 - j])
+    return ac
+  '''
+  two kinds of action: action_wrapper
+  '''
+  # def action_wrapper(self, acs):
+  #   acs = acs[0]
+  #   ac_str = []
+  #   serve_ac = np.zeros(shape=(len(acs), self.user_n))
+  #   cache_ac = np.zeros(self.edge_n)
+  #   for i in range(len(acs)):
+  #     action = list(acs[i]).index(1)
+  #     serve_num = action % np.power(2, self.user_n)
+  #     cache_num = action // np.power(2, self.user_n)
+  #     cache_ac[i] = cache_num
+  #     ac_str.append(bin(serve_num).lstrip('0b'))
+  #     for j in range(len(ac_str[i])):
+  #       serve_ac[i][4 - j] = int(ac_str[i][len(ac_str[i]) - 1 - j])
+  #   return serve_ac, cache_ac
 
+  '''
+  action is the actions of all agents
+  if user_task i in edge_cache j and corresponding action == 1, serve successfully and mark the user_task
+  cache method 1:
+  replace the task no one wants or randomly replace one if each is wanted with a new task wanted by users.
+  cache method 2:
+  randomly replace one according to Zipf function.
+  '''
   def step(self, action):
+    action = self.action_wrapper(action)
     edge_caching_task = self.state
     users_tasks = self.users_tasks
     serve_success = np.zeros(shape=(self.edge_n, self.user_n))
     cache_task_flag = self.cache_task_flag
-    # TODO action 这里怎么写？？multi-agent 怎么写action?
+    cache_success_no_action = np.zeros(self.edge_n)
     # now set action as a matrix with the shape of edge_n * user_n
     #ac = np.zeros(self.user_n)
     for i in range(self.user_n):
@@ -136,17 +160,12 @@ class CacheEnv(gym.Env):
           flag = np.argwhere(edge_caching_task[j] == users_tasks[i])
           cache_task_flag[j][flag] = 1
         elif users_tasks[i] not in edge_caching_task[j]:
-          # # choose new task according to zipf
-          # new_task = self.Zipf_sample(self.task, 1)  # zipf: sample a new task according to Zipf
-          for k in range(self.each_edge_cache_n):
-            if cache_task_flag[j][k] == 0:
-              old_task_index = k
-              break
-          if 0 not in cache_task_flag[j]:
-            old_task_index = random.randint(0, self.each_edge_cache_n - 1)
-          # choose new task according to user previous task
-          temp = np.delete(edge_caching_task[j], old_task_index)  # delete the first one
-          edge_caching_task[j] = np.append(temp, users_tasks[i])  # add the new one at the end
+          CacheMethod.unpopular_out_zipf_in(CacheMethod, each_edge_cache_n=self.each_edge_cache_n,
+                                            cache_task_flag=self.cache_task_flag, edge_caching_task=self.edge_caching_task,
+                                            edge_index=j, task=self.task)
+        else:
+          cache_success_no_action[j] = cache_success_no_action[j] + 1
+
     # print("users_tasks:\n", users_tasks)
     # print("edge_caching_task:\n", edge_caching_task)
     # print("action:\n", action)
@@ -188,17 +207,17 @@ class CacheEnv(gym.Env):
     sinr = np.sum(R_eu, axis=1)
     # reward
     #reward = sinr
-    reward = np.sum(serve_success, axis=1)
+    reward = (1000)*(np.sum(serve_success, axis=1)+1)/(cache_success_no_action+np.sum(serve_success, axis=1)+1)
     # next_obseravtion
     next_obs = self.state
     return next_obs, reward, done, {}
 
   def reset(self):
     for i in range(self.user_n):  # initial users_tasks randomly
-       self.users_tasks[i] = self.Zipf_sample(self.task, self.each_user_task_n)
+       self.users_tasks[i] = CacheMethod.Zipf_sample(self.task, self.each_user_task_n)
     # update the state at the beginning of each episode
     for i in range(self.edge_n):
-      self.edge_caching_task[i] = self.Zipf_sample(self.task, self.each_edge_cache_n)
+      self.edge_caching_task[i] = CacheMethod.Zipf_sample(self.task, self.each_edge_cache_n)
     self.state = self.edge_caching_task
     self.steps_beyond_done = None  # set the current step as 0
     self.cache_task_flag = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
