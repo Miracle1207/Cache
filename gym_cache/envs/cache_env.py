@@ -55,7 +55,7 @@ class CacheEnv(gym.Env):
 
   @property
   def action_space(self):
-    return [spaces.Discrete(np.power(2, self.user_n)*(self.task_n+1)) for i in range(self.edge_n)]
+    return [spaces.Discrete(np.power(2, self.user_n)) for i in range(self.edge_n)]
     #return [i for i in range(np.power(2, self.user_n)*(self.task_n+1))]
 
   @property
