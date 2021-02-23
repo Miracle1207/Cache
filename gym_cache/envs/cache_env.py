@@ -35,8 +35,8 @@ class CacheEnv(gym.Env):
     return [spaces.Box(low=0, high=self.task_n, shape=(self.each_edge_cache_n + self.each_edge_cache_n * self.edge_n + self.user_n, 1)) for i in range(self.edge_n)]
 
   @property
-  def action_space(self):# 5个中选3个
-    return [spaces.Discrete(10) for i in range(self.edge_n)]
+  def action_space(self):# 选择1个位置，从10个任务中选一个进行缓存更换 + 一种情况不缓存
+    return [spaces.Discrete(31) for i in range(self.edge_n)]
 
   @property
   def agents(self):
@@ -72,16 +72,30 @@ class CacheEnv(gym.Env):
   #       out_ac[i] = 3
   #       cache_ac[i] = 10
   #   return serve_ac, out_ac, cache_ac
+
+  # def action_wrapper(self, acs):
+  #   acs = acs[0]
+  #   action = np.zeros(shape=(len(acs), self.each_edge_cache_n))
+  #   for i in range(len(acs)):
+  #     action_index = list(acs[i]).index(1)
+  #     action_string = ACTION[action_index]
+  #     for j in range(len(action_string)):
+  #       action[i][j] = action_string[j]
+  #   return action
   def action_wrapper(self, acs):
     acs = acs[0]
-    action = np.zeros(shape=(len(acs), self.each_edge_cache_n))
+    ac_num = np.zeros(len(acs))
+    ac_task = np.zeros(len(acs))
     for i in range(len(acs)):
-      action_index = list(acs[i]).index(1)
-      action_string = ACTION[action_index]
-      for j in range(len(action_string)):
-        action[i][j] = action_string[j]
-    return action
-
+      action = list(acs[i]).index(1)
+      # 不更改
+      if action == 30:
+        return 0
+      # 更改缓存
+      else:
+        ac_num[i] = action // 10
+        ac_task[i] = action % 10
+    return ac_num, ac_task
   def max_cache_num(self, user_task):
     uni_len = len(np.unique(user_task))
     if uni_len == 5:
@@ -103,18 +117,25 @@ class CacheEnv(gym.Env):
     self.step_num += 1
     for i in range(self.user_n):  # initial users_tasks randomly
       self.users_tasks[i] = CacheMethod.Zipf_sample(task_set=self.task, num=self.each_user_task_n)
-    cache_action = self.action_wrapper(action)
-    cache_flag = np.zeros(shape=(self.edge_n, self.user_n))
 
-    self.edge_caching_task = cache_action
+    cache_flag = np.zeros(shape=(self.edge_n, self.user_n))
+    if self.action_wrapper(action) != 0:
+      ac_num, ac_task = self.action_wrapper(action)
+      for i in range(self.edge_n):
+        self.edge_caching_task[i][int(ac_num[i])] = ac_task[i]
+
     for i in range(self.edge_n):
-      for j in range(self.each_edge_cache_n):
-        flag_index = int(self.edge_caching_task[i][j])
-        cache_flag[i][flag_index] = 1
+      for j in range(self.user_n):
+        if self.users_tasks[j] in self.edge_caching_task[i]:
+          cache_flag[i][j] = 1
     fail = np.sum(sum(cache_flag) == 0)
-    reward = [(1-fail/self.user_n)*100/3] * self.edge_n
-    print("fail_user:", fail)
-    print("edge_caching:", self.edge_caching_task)
+    user_success = (1-fail/self.user_n)*100
+    reward = 100/3*(np.sum(cache_flag, axis=1)/self.max_cache_num(self.users_tasks))
+
+    if self.step_num == 25:
+      print("user_success_rate:", user_success)
+      print("cache_flag:", cache_flag)
+    # print("edge_caching:", self.edge_caching_task)
 
     # change state
     for i in range(self.edge_n):
