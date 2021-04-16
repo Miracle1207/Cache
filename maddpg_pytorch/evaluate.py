@@ -64,10 +64,10 @@ def run(config):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("env_id", help="Name of environment")
-    parser.add_argument("model_name",
+    parser.add_argument("env_id", default="20210401_data", help="Name of environment")
+    parser.add_argument("model_name", default="./model/eva",
                         help="Name of model")
-    parser.add_argument("run_num", default=1, type=int)
+    parser.add_argument("run_num", default=10, type=int)
     parser.add_argument("--save_gifs", action="store_true",
                         help="Saves gif of each episode into model directory")
     parser.add_argument("--incremental", default=None, type=int,

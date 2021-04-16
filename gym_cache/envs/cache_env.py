@@ -1,180 +1,388 @@
 import gym
 import numpy as np
 import random
+import math
+import copy
+from decimal import Decimal
 from gym import error, spaces, utils
 from gym.utils import seeding
 from gym_cache.envs.cache_method import CacheMethod
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
+from gym_cache.envs.DataRate import DataRate
+
 
 class CacheEnv(gym.Env):
-  metadata = {'render.modes': ['human']}
+    metadata = {'render.modes': ['human']}
 
-  def __init__(self):
-    self.task_n = 10  # the number of total tasks
-    self.task = list(range(self.task_n))  # the total tasks set
+    def __init__(self, seed_num=2):
+        '''set random seed'''
+        np.random.seed(seed_num)
+        random.seed(seed_num)
 
-    self.user_n = 5  # the number of users
-    self.each_user_task_n = 1  # the number of requested task by each user
-    self.users_tasks = np.zeros(shape=(self.user_n, self.each_user_task_n))
-    for i in range(self.user_n):  # initial users_tasks randomly
-      self.users_tasks[i] = CacheMethod.Zipf_sample(task_set=self.task, num=self.each_user_task_n)
-    self.edge_n = 3  # the number of agent(edge server)
-    self.each_edge_cache_n = 3  # the number of caching tasks by each edge server
-    # state : the set of each edge servers' caching tasks
-    self.edge_caching_task = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
+        self.DR = DataRate(seed_num=seed_num)
+        self.task_n = 50  # the number of total tasks
+        self.task = list(range(self.task_n))  # the total tasks set
+        self.CM = CacheMethod()
+        self.user_n = 20  # the number of users
+        self.each_user_task_n = 1  # the number of requested task by each user
+        self.users_tasks = np.zeros(shape=(self.user_n, self.each_user_task_n))
+        # for i in range(self.user_n):  # initial users_tasks randomly
+        self.users_tasks = CacheMethod.Zipf_sample(self.CM, task_set=self.task, num=self.user_n*self.each_user_task_n, v=1.2) # v = 0.8
+        self.user_recent_q = np.zeros(self.task_n)
+        self.edge_n = 3
+        self.each_edge_cache_n = 10  # the number of caching tasks by each edge server
+        # state : the set of each edge servers' caching tasks
+        self.edge_caching_task = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
+        self.file_size = 1000000  # 1 Mbit
 
-    # state = serve_success+flag   agent         user_task     自己缓存的内容的大小
-    self.state = np.zeros(shape=(self.edge_n, (1 + self.each_edge_cache_n * self.edge_n + self.user_n)))
+        '''users' position'''
+        self.user_x = np.loadtxt("/home/mqr/Cache/gym_cache/envs/user_ppp/1221/ex.txt")
+        self.user_y = np.loadtxt("/home/mqr/Cache/gym_cache/envs/user_ppp/1221/ey.txt")
+        '''random channel gain'''
+        self.alpha = 4
+        self.edge_h = self.DR.channel_gain(self.alpha, self.user_x, self.user_y)
+        self.cloud_h = self.DR.cloud_channel_gain(self.alpha)
+        '''random init power'''
+        self.edge_p_init = self.DR.power_init()
+        self.cloud_p_init = self.DR.cloud_power_init()
 
-    self.seed()  # TODO control some features change randomly
-    self.viewer = None  # whether open the visual tool
-    self.steps_beyond_done = None  # current step = 0
-    self.step_num = 0
+        '''distance from edge server i to user j'''
+        self.d = DataRate.distance_compute(self.DR, self.user_x, self.user_y)
+        self.position_flag = np.zeros(shape=(self.edge_n, self.user_n))
+        '''position'''
+        for i in range(self.edge_n):
+            for j in range(self.user_n):
+                if self.d[i][j] < self.DR.r:
+                    self.position_flag[i][j] = 1
+        self.each_edge_user_num = np.sum(self.position_flag, axis=1)
+        self.obsp_user_task = int(max(self.each_edge_user_num))
+        self.each_edge_user_task = np.zeros(shape=(self.edge_n, self.obsp_user_task))
+        '''state: own users' request + caching contents'''
+        self.edge_caching_task = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
+        # self.state = np.zeros(
+        #     shape=(self.edge_n, self.obsp_user_task))
+        self.state = np.zeros(
+            shape=(self.edge_n, self.each_edge_cache_n+self.obsp_user_task))
+        '''state update'''
+        for i in range(self.edge_n):
+            for j in range(self.obsp_user_task):
+                if j < self.each_edge_user_num[i]:
+                    self.each_edge_user_task[i][j] = self.users_tasks[np.where(self.position_flag[i] == 1)[0][j]]
+                else:
+                    self.each_edge_user_task[i][j] = self.each_edge_user_task[i][j-int(self.each_edge_user_num[i])]
+        '''自缓存+自用户'''
+        for i in range(self.edge_n):
+            self.state[i] = np.append(self.edge_caching_task[i], self.each_edge_user_task[i])
+        '''自用户'''
+        # for i in range(self.edge_n):
+        #     self.state[i] = self.each_edge_user_task[i]
+        '''全用户'''
+        # for i in range(self.edge_n):
+        #     self.state[i] = self.users_tasks.T
+         # TODO control some features change randomly
+        self.viewer = None  # whether open the visual tool
+        self.steps_beyond_done = None  # current step = 0
+        self.step_num = 0
 
-  @property
-  def observation_space(self):
-    return [spaces.Box(low=0, high=self.task_n, shape=(1 + self.each_edge_cache_n * self.edge_n + self.user_n, 1)) for i in range(self.edge_n)]
-
-  @property
-  def action_space(self):# 32*(3*10 + 1) 还有一种情况是不换
-    return [spaces.Discrete(np.power(2, self.user_n) * (self.each_edge_cache_n * self.task_n + 1)) for i in range(self.edge_n)]
-
-  @property
-  def agents(self):
-    return ['agent' for i in range(self.edge_n)]
-
-  def seed(self, seed=None):
-    self.np_random, seed = seeding.np_random(seed)
-    return [seed]
-
-  # sample randomly from task_set
-  def random_sample(self, task_set, num):
-    sample_task = random.sample(task_set, num)
-    return sample_task
-
-  def action_wrapper(self, acs):
-    acs = acs[0]
-    ac_str = []
-    serve_ac = np.zeros(shape=(len(acs), self.user_n))
-    out_ac = np.zeros(len(acs))
-    cache_ac = np.zeros(len(acs))
-    for i in range(len(acs)):
-      action = list(acs[i]).index(1)
-      serve_num = action % np.power(2, self.user_n)
-      ac_str.append(bin(serve_num).lstrip('0b'))
-      for j in range(len(ac_str[i])):
-        serve_ac[i][4 - j] = int(ac_str[i][len(ac_str[i]) - 1 - j])
-
-      if action < np.power(2, self.user_n) * (self.each_edge_cache_n * self.task_n + 1):
-        cache_out_num = action // np.power(2, self.user_n)
-        out_ac[i] = cache_out_num // self.task_n
-        cache_ac[i] = cache_out_num % self.task_n
-      else: # 不进行缓存
-        out_ac[i] = 3
-        cache_ac[i] = 10
-    return serve_ac, out_ac, cache_ac
-
-  def max_cache_num(self, user_task):
-    uni_len = len(np.unique(user_task))
-    if uni_len == 5:
-      max_score = 3
-    elif uni_len == 4:
-      max_score = 4
-    else:
-      max_score = 5
-    return max_score
-  '''
-  action is the actions of all agents
-  if user_task i in edge_cache j and corresponding action == 1, serve successfully and mark the user_task
-  cache method 1:
-  replace the task no one wants or randomly replace one if each is wanted with a new task wanted by users.
-  cache method 2:
-  randomly replace one according to Zipf function.
-  '''
-  def step(self, action):
-    self.step_num += 1
-    for i in range(self.user_n):  # initial users_tasks randomly
-      self.users_tasks[i] = CacheMethod.Zipf_sample(task_set=self.task, num=self.each_user_task_n)
-    serve_action, out_action, cache_action = self.action_wrapper(action)
-    cache_flag = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
-    serve_flag = np.zeros(shape=(self.edge_n, self.user_n))
-    edge_cache_flag = np.zeros(shape=(self.edge_n, self.user_n))
-    edge_unique = np.zeros(self.edge_n)
-
-    # do action + change flag
-    for j in range(self.edge_n):
-      out_index = int(out_action[j])
-      if out_index < 3 and cache_action[j] < 10:
-        self.edge_caching_task[j][out_index] = cache_action[j]
-      ac = serve_action[j]
-      for i in range(self.user_n):
-        if self.users_tasks[i] in self.edge_caching_task[j]:
-          edge_cache_flag[j][i] = 1
-          if ac[i] == 1:
-            serve_flag[j][i] = 1
-      for k in range(self.each_edge_cache_n):
-        if self.edge_caching_task[j][k] in self.users_tasks:
-          cache_flag[j][k] = 1
-      edge_unique[j] = len(np.unique(self.edge_caching_task[j]))
-    user_cache_flag = np.sum(edge_cache_flag, axis=0)
-    user_fail = 0
-    for each in user_cache_flag:
-      if each == 0:
-        user_fail += 1
+        '''plot'''
+        # fig = plt.figure()
+        # # Plotting
+        # plt.scatter(self.user_x, self.user_y, edgecolor='b', facecolor='none', alpha=0.5, label="Users")
+        #
+        # # margin
+        #
+        # ax = fig.add_subplot(111)
+        # cir1 = Circle(xy=(0.0, 0.0), radius=1, alpha=0.1, color="b", label="E1 Coverage")
+        # cir2 = Circle(xy=(1.0, 0.0), radius=1, alpha=0.1, color="g", label="E2 Coverage")
+        # cir3 = Circle(xy=(0.5, 1), radius=1, alpha=0.1, color="r", label="E3 Coverage")
+        # ax.add_patch(cir1)
+        # ax.add_patch(cir2)
+        # ax.add_patch(cir3)
+        #
+        # ax.plot(0, 0, 'b*', label="Edge 1")
+        # ax.plot(1, 0, 'g*', label="Edge 2")
+        # ax.plot(0.5, 1, 'r*', label="Edge 3")
+        #
+        # plt.axis('scaled')
+        # plt.axis('equal')  # changes limits of x or y axis so that equal increments of x and y have the same length
+        # plt.xlabel("x")
+        # plt.ylabel("y")
+        # plt.axis('equal')
+        # plt.legend(loc="upper right",borderaxespad=0)
+        # plt.show()
 
 
-    # compute reward according to flag              [1,2,3,4,5]
-    # total success
-    serve_reward = np.sum(serve_flag, axis=1)/self.max_cache_num(self.users_tasks)
-    # serve success on condition of caching successfully
-    serve_rate = (np.sum(serve_flag, axis=1)+0.001)/(np.sum(edge_cache_flag, axis=1)+0.001)
-    # caching tasks be highly used
-    cache_reward = np.sum(cache_flag, axis=1)/self.each_edge_cache_n
-    # highly cache what users want
-    user_reward = 1 - user_fail/self.user_n
-    # difference in each agent
-    # [1,1,3] [1,3]
-    in_agent_dif_rew = edge_unique/self.each_edge_cache_n
-    #reward = 100/9*(5*serve_reward+cache_reward+serve_rate+user_reward+in_agent_dif_rew)
-    reward = 100* serve_reward
-    # state:[1,2,1,3,0]  [1,1,3]
-    # action: serve[1 0 1 0 1]  cache [1] in (0,3) ; [3] in (1,10)
-    # print
-    if self.step_num == 1:
-      print("-------------------------------------------------------")
-    if self.step_num == 1 or self.step_num == 50 or self.step_num == 99:
-      print("step %i:" % self.step_num)
-      print("serve_reward:", serve_reward)
-      print("serve_rate:", serve_rate)
-      print("user_reward:", user_reward)
-      print("in_agent_dif_rew:", in_agent_dif_rew)
-      print("cache_reward:", cache_reward)
-      print("reward: ", reward, '\n\n\n')
+    @property
+    def observation_space(self):
+        return [spaces.Box(low=0, high=self.task_n,
+                           shape=(self.obsp_user_task+self.each_edge_cache_n, 1)) for i
+                in range(self.edge_n)]
 
-    # change state
-    for i in range(self.edge_n):
-      self.state[i] = np.append(np.append(i, np.ndarray.flatten(self.edge_caching_task)), self.users_tasks)
+    @property
+    def action_space(self):  # agent选一个进来
+        return [spaces.Discrete(self.each_edge_cache_n*self.task_n+1) for i in range(self.edge_n)]
 
-    done = 1
-    next_obs = self.state
+    @property
+    def agents(self):
+        return ['agent' for i in range(self.edge_n)]
 
-    return next_obs, reward, done, {}
+    # sample randomly from task_set
+    def random_sample(self, task_set, num):
+        sample_task = random.sample(task_set, num)
+        return sample_task
+
+    def action_wrapper(self, acs):
+        acs = acs[0]
+        ac_num = np.zeros(len(acs))
+        ac_task = np.zeros(len(acs))
+        for i in range(len(acs)):
+            if sum(list(acs[i])) == 0:
+                return 0
+            else:
+                action = list(acs[i]).index(1)
+                # 不更改
+                if action == self.each_edge_cache_n*self.task_n:
+                    return 0
+                # 更改缓存
+                else:
+                    ac_num[i] = action // self.task_n
+                    ac_task[i] = action % self.task_n
+                return ac_num, ac_task
+    # def action_wrapper(self, acs):
+    #     acs = acs[0]
+    #     ac_task = np.zeros(len(acs))
+    #     for i in range(len(acs)):
+    #         action = list(acs[i]).index(1)
+    #         ac_task[i] = action
+    #     return ac_task
 
 
-  def reset(self):
-    self.step_num = 0
-    cache_user_fail = np.zeros(self.user_n)
-    for i in range(self.user_n):  # initial users_tasks randomly
-       self.users_tasks[i] = CacheMethod.Zipf_sample(self.task, self.each_user_task_n)
-    # update the state at the beginning of each episode
+    def step(self, action):
+        # RL: cache network
+        self.step_num += 1
+        self.users_tasks = CacheMethod.Zipf_sample(self.CM, task_set=self.task, num=self.user_n*self.each_user_task_n, v=1.2)
+        cache_flag = np.zeros(shape=(self.edge_n, self.user_n))
+        if self.step_num % 3 == 0:
+            self.user_recent_q = np.zeros(self.task_n)
+        for each in self.users_tasks:
+            self.user_recent_q[each] += 1
+        '''
+        cache predict
+        '''
+        if self.action_wrapper(action) != 0:
+            ac_num, ac_task = self.action_wrapper(action)
+            for i in range(self.edge_n):
+                self.edge_caching_task[i][int(ac_num[i])] = ac_task[i]
+        '''
+        cache predict + FIFO
+        '''
+        # ac_task = self.action_wrapper(action)
+        # for i in range(self.edge_n):
+        #     if ac_task[i] < self.task_n:
+        #         self.edge_caching_task[i][self.each_edge_cache_n-1] = ac_task[i]
+        '''
+        cache predict + LRU
+        '''
+        # ac_task = self.action_wrapper(action)
+        # for i in range(self.edge_n):
+        #     if ac_task[i] < self.task_n:
+        #         self.edge_caching_task[i] = CacheMethod.RL_LRU(self.CM, self.user_recent_q, self.edge_caching_task[i], ac_task[i])
+        '''
+        FIFO
+        '''
+        # temp = self.edge_caching_task[:, 1:]
+        # new_task = np.random.choice(self.task, self.edge_n)
+        # self.edge_caching_task = np.column_stack((temp, new_task.T))
 
-    self.edge_caching_task = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
-    self.state = np.zeros(shape=(self.edge_n, (1 + self.each_edge_cache_n * self.edge_n + self.user_n)))
-    self.steps_beyond_done = None  # set the current step as 0
+        '''random+LRU'''
+        # self.edge_caching_task = CacheMethod.random_LRU(self.CM, self.user_recent_q, self.edge_caching_task, self.task)
+        '''random+LFU'''
+        # self.edge_caching_task = CacheMethod.random_LFU(self.CM, self.edge_caching_task, self.task)
+        '''
+        cache hit rate
+        '''
+        # reward = np.zeros(self.edge_n)
+        # cache_hit = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
+        # for i in range(self.edge_n):
+        #     for j in range(self.each_edge_cache_n):
+        #         if self.edge_caching_task[i][j] in self.users_tasks:
+        #             cache_hit[i][j] = 1
+        #     reward[i] = 1/3*sum(cache_hit[i])/self.each_edge_cache_n
+        #
 
-    return np.array(self.state)  # return the initial state
-  def render(self, mode='human'):
-    ...
-  def close(self):
-    if self.viewer:
-      self.viewer.close()
-      self.viewer = None
+        '''
+        user serve rate
+        '''
+        for i in range(self.edge_n):
+            for j in range(self.user_n):
+                if self.position_flag[i][j] == 1:
+                    if self.users_tasks[j] in self.edge_caching_task[i]:
+                        cache_flag[i][j] = 1
+
+        # fail = list(sum(cache_flag)).count(0)
+        # # cache hit rate
+        # reward = np.zeros(self.edge_n)
+        # for k in range(self.edge_n):
+        #     reward[k] = 1/3*(1-fail/self.user_n)
+
+        '''Data rate as reward'''
+        # p = self.DR.power_update(self.edge_p_init, cache_flag)
+        # rate = self.DR.compute_DataRate(self.edge_h, p)
+        # # obs_user_n = self.each_edge_user_num
+        # '''将reward设为 dara rate 比上 观察用户数量'''
+        # # reward = rate/obs_user_n
+        # reward = rate
+        '''delay as reward'''
+
+        delay, rate = self.DR.compute_Delay(cloud_h=self.cloud_h, cloud_p_ini=self.cloud_p_init,
+                                      edge_h=self.edge_h, edge_p_ini=self.edge_p_init,
+                                      connect_flag=cache_flag, file_size=self.file_size)
+        reward = rate
+
+        '''state update'''
+        for i in range(self.edge_n):
+            for j in range(self.obsp_user_task):
+                if j < self.each_edge_user_num[i]:
+                    self.each_edge_user_task[i][j] = self.users_tasks[np.where(self.position_flag[i] == 1)[0][j]]
+                else:
+                    self.each_edge_user_task[i][j] = self.each_edge_user_task[i][j-int(self.each_edge_user_num[i])]
+        '''自缓存+自用户'''
+        for i in range(self.edge_n):
+            self.state[i] = np.append(self.edge_caching_task[i], self.each_edge_user_task[i])
+        '''自用户'''
+        # for i in range(self.edge_n):
+        #     self.state[i] = self.each_edge_user_task[i]
+        '''全用户'''
+        # for i in range(self.edge_n):
+        #     self.state[i] = self.users_tasks.T
+        if self.step_num == 99:
+            print("edge:\n", cache_flag)
+
+        done = 1
+        next_obs = self.state
+        return next_obs, reward, done, {}, cache_flag, delay
+    def bi_step(self, action):
+        # RL: cache network
+        self.step_num += 1
+        cache_flag = np.zeros(shape=(self.edge_n, self.user_n))
+        '''
+        cache predict
+        '''
+        if self.action_wrapper(action) != 0:
+            ac_num, ac_task = self.action_wrapper(action)
+            for i in range(self.edge_n):
+                self.edge_caching_task[i][int(ac_num[i])] = ac_task[i]
+
+        '''
+        user serve rate
+        '''
+        for i in range(self.edge_n):
+            for j in range(self.user_n):
+                if self.position_flag[i][j] == 1:
+                    if self.users_tasks[j] in self.edge_caching_task[i]:
+                        cache_flag[i][j] = 1
+
+        '''Data rate as reward'''
+        # p = self.DR.power_update(self.p_init, cache_flag)
+        # rate = self.DR.compute_DataRate(self.edge_h, p)
+        # obs_user_n = self.each_edge_user_num
+        # '''将reward设为 dara rate 比上 观察用户数量'''
+        # # reward = rate/obs_user_n
+        # reward = rate
+        '''Delay as reward'''
+        delay, rate = self.DR.compute_Delay(cloud_h=self.cloud_h, cloud_p_ini=self.cloud_p_init,
+                                      edge_h=self.edge_h, edge_p_ini=self.edge_p_init,
+                                      connect_flag=cache_flag, file_size=self.file_size)
+        reward = rate
+
+        '''state update'''
+        for i in range(self.edge_n):
+            for j in range(self.obsp_user_task):
+                if j < self.each_edge_user_num[i]:
+                    self.each_edge_user_task[i][j] = self.users_tasks[np.where(self.position_flag[i] == 1)[0][j]]
+                else:
+                    self.each_edge_user_task[i][j] = self.each_edge_user_task[i][j-int(self.each_edge_user_num[i])]
+        '''自缓存+自用户'''
+        for i in range(self.edge_n):
+            self.state[i] = np.append(self.edge_caching_task[i], self.each_edge_user_task[i])
+        '''自用户'''
+        # for i in range(self.edge_n):
+        #     self.state[i] = self.each_edge_user_task[i]
+        '''全用户'''
+        # for i in range(self.edge_n):
+        #     self.state[i] = self.users_tasks.T
+        if self.step_num == 99:
+            print("edge:\n", cache_flag)
+
+        done = 1
+        next_obs = self.state
+        return next_obs, reward, done, {}, cache_flag, delay
+
+    def reset(self):
+        self.step_num = 0
+        # cache_user_fail = np.zeros(self.user_n)
+        # self.users_tasks = CacheMethod.Zipf_sample(self.CM, task_set=self.task, num=self.user_n*self.each_user_task_n, v=2)
+        # update the state at the beginning of each episode
+        self.edge_caching_task = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
+        self.each_edge_user_task = np.zeros(shape=(self.edge_n, self.obsp_user_task))
+        '''state: own users' request + caching contents'''
+        self.state = np.zeros(
+            shape=(self.edge_n, self.each_edge_cache_n+self.obsp_user_task))
+        self.steps_beyond_done = None  # set the current step as 0
+        return np.array(self.state)  # return the initial state
+
+    def bi_reset(self, access_way):
+        '''只改变state，变成接入用户的申请'''
+        self.step_num = 0
+        obs_user = [[] for u_i in range(self.edge_n)]
+        for e_i in range(self.edge_n):
+            for u_i in np.where(self.position_flag[e_i] == 1)[0]:
+                if sum(access_way)[u_i] < 2:
+                    obs_user[e_i].append(u_i)
+                else:
+                    if access_way[e_i][u_i] == 1:
+                        obs_user[e_i].append(u_i)
+            self.each_edge_user_num[e_i] = len(obs_user[e_i])
+        self.each_edge_user_task = np.zeros(shape=(self.edge_n, self.obsp_user_task))
+        '''state: own users' request + caching contents'''
+        '''state update'''
+        for i in range(self.edge_n):
+            for j in range(self.obsp_user_task):
+                if j < self.each_edge_user_num[i]:
+                    self.each_edge_user_task[i][j] = self.users_tasks[obs_user[i][j]]
+                else:
+                    self.each_edge_user_task[i][j] = self.each_edge_user_task[i][j - int(self.each_edge_user_num[i])]
+        '''state: own users' request + caching contents'''
+        for i in range(self.edge_n):
+            self.state[i] = np.append(self.edge_caching_task[i], self.each_edge_user_task[i])
+        return np.array(self.state)  # return the initial state
+
+
+    def render(self, mode='human'):
+        ...
+
+    def close(self):
+        if self.viewer:
+            self.viewer.close()
+            self.viewer = None
+
+
+ACTION = {
+    0: '0000',
+    1: '0001',
+    2: '0010',
+    3: '0011',
+    4: '0100',
+    5: '0101',
+    6: '0110',
+    7: '0111',
+    8: '1000',
+    9: '1001',
+    10:'1010',
+    11:'1011',
+    12:'1100',
+    13:'1101',
+    14:'1110',
+    15:'1111'
+}

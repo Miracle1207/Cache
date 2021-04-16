@@ -1,10 +1,10 @@
 import torch
 import torch.nn.functional as F
 from gym.spaces import Box, Discrete
-from ..utils.networks import MLPNetwork
-from ..utils.misc import soft_update, average_gradients, onehot_from_logits, gumbel_softmax
-from ..utils.agents import DDPGAgent
 
+from maddpg_pytorch.utils.networks import MLPNetwork
+from maddpg_pytorch.utils.misc import soft_update, average_gradients, onehot_from_logits, gumbel_softmax
+from maddpg_pytorch.utils.agents import DDPGAgent
 MSELoss = torch.nn.MSELoss()
 
 class MADDPG(object):
@@ -161,11 +161,11 @@ class MADDPG(object):
             average_gradients(curr_agent.policy)
         torch.nn.utils.clip_grad_norm(curr_agent.policy.parameters(), 0.5)
         curr_agent.policy_optimizer.step()
-        if logger is not None:
-            logger.add_scalars('agent%i/losses' % agent_i,
-                               {'vf_loss': vf_loss,
-                                'pol_loss': pol_loss},
-                               self.niter)
+        # if logger is not None:
+        #     logger.add_scalars('agent%i/losses' % agent_i,
+        #                        {'vf_loss': vf_loss,
+        #                         'pol_loss': pol_loss},
+        #                        self.niter)
 
     def update_all_targets(self):
         """
