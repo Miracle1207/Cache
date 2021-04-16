@@ -2,29 +2,50 @@ import numpy as np
 import random
 
 class CacheMethod(object):
+
     '''
     sample a task according to Zipf distribution
     task_set: the set we sample from
     num: the number of sampled tasks
+    v: preference
     '''
-    def Zipf_sample(task_set, num):
+    def Zipf_sample(self, task_set, num, v):
         # probability distribution
         task_num = len(task_set)
         p = np.zeros(task_num)
         for i in range(task_num):
-            p[i] = int(0.1 / (i + 1) * 100000)
-        sampled_task = []
-        for j in range(num):
-            # sample & return index
-            start = 0
-            index = 0
-            randnum = random.randint(1, sum(p))
-            for index, scope in enumerate(p):
-                start += scope
-                if randnum <= start:
-                    break
-            sampled_task.append(index)
+            p[i] = 1 / (i + 1) ** v
+        p = p / sum(p)
+        sampled_task = np.random.choice(task_set, size=num, p=p)
         return sampled_task
+    '''random_in + LFU_out'''
+    def random_LFU(self, edge_caching, task_lib):
+        edge_n = len(edge_caching)
+        new_task = np.random.choice(task_lib, edge_n)
+        for ed_i in range(edge_n):
+            out_index = int(np.argmin(edge_caching[ed_i]))
+            edge_caching[ed_i][out_index] = new_task[ed_i]
+        return edge_caching
+    def random_LRU(self, user_q, edge_caching, task_lib):
+        edge_n = len(edge_caching)
+        task_n = len(edge_caching[0])
+        new_task = np.random.choice(task_lib, edge_n)
+        caching_task_q = np.zeros(task_n)
+        for ed_i in range(edge_n):
+            for f_i in range(task_n):
+                caching_task_q[f_i] = user_q[int(edge_caching[ed_i][f_i])]
+            out_index = int(np.argmin(caching_task_q))
+            edge_caching[ed_i][out_index] = new_task[ed_i]
+        return edge_caching
+    def RL_LRU(self, user_q, each_edge_caching, new_task):
+        task_n = len(each_edge_caching)
+        caching_task_q = np.zeros(task_n)
+        for f_i in range(task_n):
+            caching_task_q[f_i] = user_q[int(each_edge_caching[f_i])]
+        out_index = int(np.argmin(caching_task_q))
+        each_edge_caching[out_index] = new_task
+        return each_edge_caching
+
 
     '''
     cache method 1: randomly choose one out; choose a new task according to user's requests
