@@ -14,6 +14,7 @@ from maddpg_pytorch.algorithms.maddpg import MADDPG
 from gym_cache.envs.cache_env import CacheEnv
 from gym_cache.envs.DataRate import DataRate
 
+
 USE_CUDA = False  # torch.cuda.is_available()
 
 # def make_parallel_env(env_id, n_rollout_threads, seed, discrete_action):
@@ -51,7 +52,7 @@ def run(config):
     if not USE_CUDA:
         torch.set_num_threads(config.n_training_threads)
     #env = make_parallel_env(config.env_id, config.n_rollout_threads, config.seed,config.discrete_action)
-    env = CacheEnv()
+
     maddpg = MADDPG.init_from_env(env, agent_alg=config.agent_alg,
                                   adversary_alg=config.adversary_alg,
                                   tau=config.tau,
@@ -66,7 +67,7 @@ def run(config):
     for ep_i in range(0, config.n_episodes, config.n_rollout_threads):
         print("Episodes %i-%i of %i" % (ep_i + 1,
                                         ep_i + 1 + config.n_rollout_threads,
-                                        config.n_episodes))
+                                        config.n_episodes+config.bi_n_episodes))
         obs = env.reset()
         # obs.shape = (n_rollout_threads, nagent)(nobs), nobs differs per agent so not tensor
         maddpg.prep_rollouts(device='cpu')
@@ -86,7 +87,7 @@ def run(config):
             agent_actions = [ac.data.numpy() for ac in torch_agent_actions]
             # rearrange actions to be per environment
             actions = [[ac[i] for ac in agent_actions] for i in range(config.n_rollout_threads)]
-            next_obs, rewards, dones, infos = env.step(actions)
+            next_obs, rewards, dones, infos, cache_flag = env.step(actions)
 
             replay_buffer.push(obs, agent_actions, rewards, next_obs, dones)
             obs = next_obs
@@ -106,8 +107,7 @@ def run(config):
                 maddpg.prep_rollouts(device='cpu')
         ep_rews = replay_buffer.get_average_rewards(
             config.episode_length * config.n_rollout_threads)
-        # ep_rews = replay_buffer.get_average_rewards(
-        #     50)
+
         for a_i, a_ep_rew in enumerate(ep_rews):
             #print('agent%i/mean_episode_rewards' % a_i, a_ep_rew, ep_i)
             logger.add_scalar('agent%i/mean_episode_rewards' % a_i, a_ep_rew, ep_i)
@@ -119,6 +119,62 @@ def run(config):
             maddpg.save(run_dir / 'incremental' / ('model_ep%i.pt' % (ep_i + 1)))
             maddpg.save(run_dir / 'model.pt')
 
+    access_flag = cache_flag
+    for ep_i in range(config.n_episodes, config.n_episodes+config.bi_n_episodes, config.n_rollout_threads):
+        print("Episodes %i-%i of %i" % (ep_i + 1,
+                                        ep_i + 1 + config.n_rollout_threads,
+                                        config.n_episodes+config.bi_n_episodes))
+
+        obs = env.bi_reset(access_way=access_flag)
+        # obs.shape = (n_rollout_threads, nagent)(nobs), nobs differs per agent so not tensor
+        maddpg.prep_rollouts(device='cpu')
+
+        explr_pct_remaining = max(0, config.n_exploration_eps - ep_i) / config.n_exploration_eps
+        maddpg.scale_noise(config.final_noise_scale + (config.init_noise_scale - config.final_noise_scale) * explr_pct_remaining)
+        maddpg.reset_noise()
+
+        for et_i in range(config.cache_episode_length):
+            env.render()
+
+            torch_obs = [Variable(torch.Tensor(np.vstack(obs[i])), requires_grad=False) for i in range(env.edge_n)] # maddpg.nagents ---3
+            torch_agent_actions = maddpg.step(torch_obs, explore=True)
+            agent_actions = [ac.data.numpy() for ac in torch_agent_actions]
+            actions = [[ac[i] for ac in agent_actions] for i in range(config.n_rollout_threads)]
+            next_obs, rewards, dones, infos, cache_flag = env.bi_step(actions)
+
+            replay_buffer.push(obs, agent_actions, rewards, next_obs, dones)
+            obs = next_obs
+            t += config.n_rollout_threads
+            if (len(replay_buffer) >= config.batch_size and
+                (t % config.steps_per_update) < config.n_rollout_threads):
+                if USE_CUDA:
+                    maddpg.prep_training(device='gpu')
+                else:
+                    maddpg.prep_training(device='cpu')
+                for u_i in range(config.n_rollout_threads):
+                    for a_i in range(maddpg.nagents):
+                        sample = replay_buffer.sample(config.batch_size,
+                                                      to_gpu=USE_CUDA)
+                        maddpg.update(sample, a_i, logger=logger)
+                    maddpg.update_all_targets()
+                maddpg.prep_rollouts(device='cpu')
+        ep_rews = replay_buffer.get_average_rewards(
+            config.episode_length * config.n_rollout_threads)
+        access_flag = DataRate.run_BLA(DR, config.bla_steps, connect_flag=cache_flag, p_init=env.p_init, h=env.h)
+
+        for a_i, a_ep_rew in enumerate(ep_rews):
+            #print('agent%i/mean_episode_rewards' % a_i, a_ep_rew, ep_i)
+            logger.add_scalar('agent%i/mean_episode_rewards' % a_i, a_ep_rew, ep_i)
+        logger.add_scalar('total_mean_episode_rewards', sum(ep_rews), ep_i)
+        print('total_mean_episode_rewards', sum(ep_rews), ep_i)
+
+        if ep_i % config.save_interval < config.n_rollout_threads:
+            os.makedirs(run_dir / 'incremental', exist_ok=True)
+            maddpg.save(run_dir / 'incremental' / ('model_ep%i.pt' % (ep_i + 1)))
+            maddpg.save(run_dir / 'model.pt')
+
+
+
     maddpg.save(run_dir / 'model.pt')
     env.close()
     logger.export_scalars_to_json(str(log_dir / 'summary.json'))
@@ -127,8 +183,9 @@ def run(config):
 
 if __name__ == '__main__':
     env = CacheEnv()
+    DR = DataRate()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env_id", help="Name of environment", default="20210324_data")
+    parser.add_argument("--env_id", help="Name of environment", default="20210329_data")
     parser.add_argument("--model_name",
                         help="Name of directory to store " +
                              "model/training contents", default="./model")
@@ -138,8 +195,13 @@ if __name__ == '__main__':
     parser.add_argument("--n_rollout_threads", default=1, type=int) # walker
     parser.add_argument("--n_training_threads", default=6, type=int)
     parser.add_argument("--buffer_length", default=int(1e5), type=int)
-    parser.add_argument("--n_episodes", default=5000, type=int) # 10000 better
+    parser.add_argument("--n_episodes", default=2, type=int) # 10000 better
     parser.add_argument("--episode_length", default=100, type=int) # TODO increase the lenghth 25
+
+    parser.add_argument("--bi_n_episodes", default=500, type=int)
+    parser.add_argument("--cache_episode_length", default=100, type=int)
+    parser.add_argument("--bla_steps", default=50, type=int)
+
     parser.add_argument("--steps_per_update", default=100, type=int)
     parser.add_argument("--batch_size",
                         default=1024, type=int,

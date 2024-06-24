@@ -7,7 +7,7 @@ class CacheMethod(object):
     task_set: the set we sample from
     num: the number of sampled tasks
     '''
-    def Zipf_sample(task_set, num):
+    def Zipf_sample(self, task_set, num):
         # probability distribution
         task_num = len(task_set)
         p = np.zeros(task_num)
