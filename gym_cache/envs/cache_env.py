@@ -3,9 +3,12 @@ import numpy as np
 import random
 import math
 import copy
+from decimal import Decimal
 from gym import error, spaces, utils
 from gym.utils import seeding
 from gym_cache.envs.cache_method import CacheMethod
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 
 
 class CacheEnv(gym.Env):
@@ -43,6 +46,14 @@ class CacheEnv(gym.Env):
         self.beta_2 = np.ones(shape=(self.edge_n, self.each_edge_cache_n))
         self.cache_buffer_flag = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
         self.change_flag = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
+        self.last_25_cache_flag = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
+        self.last_25_change_flag = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
+        # PPP
+        self.x1 = 0
+        self.y1 = 0
+        self.x2, self.y2 = 1, 0
+        self.x3, self.y3 = 1, 1.5
+        self.lambda0 = 5
         # power bisection
         self.p_total = 19.953  # total power is 19.953w, namely 43dbm
         self.p = self.p_total / self.user_n
@@ -140,23 +151,25 @@ class CacheEnv(gym.Env):
         return rate
 
     '''
-  action is the actions of all agents
-  if user_task i in edge_cache j and corresponding action == 1, serve successfully and mark the user_task
-  cache method 1:
-  replace the task no one wants or randomly replace one if each is wanted with a new task wanted by users.
-  cache method 2:
-  randomly replace one according to Zipf function.
-  '''
-
+    add BLA:
+    beta_compute: generate probability of action
+    reward_compute: compute the delay of action
+    '''
     # 从beta分布中生成俩值
     def beta_compute(self, a_1, b_1, a_2, b_2):
         temp = 0
         for i in range(int(a_2), int(a_2 + b_2)):
-            temp += (math.factorial(a_1 + i - 1) * math.factorial(a_2 + b_2 + b_1 - i - 2)) / (
-                        math.factorial(i) * math.factorial(a_2 + b_2 - 1 - i))
-        p = (math.factorial(a_1 + b_1 - 1) * math.factorial(a_2 + b_2 - 1)) / (
-                    math.factorial(a_1 - 1) * math.factorial(b_1 - 1) * math.factorial(
-                a_1 + b_1 + a_2 + b_2 - 2)) * temp
+            x_1 = Decimal(math.factorial(i))
+            x_2 = Decimal(math.factorial(a_2 + b_2 - 1 - i))
+            x_3 = Decimal(math.factorial(a_1 + i - 1))
+            x_4 = Decimal(math.factorial(a_2 + b_2 + b_1 - i - 2))
+            temp += (x_3 * x_4) / (x_1 * x_2)
+        x_5 = Decimal(math.factorial(a_1 + b_1 - 1))
+        x_6 = Decimal(math.factorial(a_2 + b_2 - 1))
+        x_7 = Decimal(math.factorial(a_1 - 1))
+        x_8 = Decimal(math.factorial(b_1 - 1))
+        x_9 = Decimal(math.factorial(a_1 + b_1 + a_2 + b_2 - 2))
+        p = ((x_5 * x_6) / ( x_7 * x_8 * x_9)) * temp
         return p
 
     def reward_compute(self, action, change_flag):
@@ -168,6 +181,60 @@ class CacheEnv(gym.Env):
             if change_flag == 1: # t = 1
                 delay += self.buffer_t
         return delay
+    '''
+    PPP: poisson point process
+    user_ppp: input the coordinate(xx0, yy0) of edge server, 
+                generate 5 user around it and draw the area of working
+                lambda0: the intensity (ie mean density) of the Poisson process
+    '''
+    def user_ppp(self, xx0, yy0, lambda0):
+        # Simulation window parameters
+        r = 1  # radius of disk
+        areaTotal = np.pi * r ** 2  # area of disk
+
+        # Point process parameters
+        numbPoints = np.random.poisson(lambda0 * areaTotal)  # Poisson number of points
+        theta = 2 * np.pi * np.random.uniform(0, 1, numbPoints)  # angular coordinates
+        rho = r * np.sqrt(np.random.uniform(0, 1, numbPoints))  # radial coordinates
+        # Convert from polar to Cartesian coordinates
+        xx = rho * np.cos(theta)
+        yy = rho * np.sin(theta)
+        # Shift centre of disk to (xx0,yy0)
+        xx = xx + xx0
+        yy = yy + yy0
+        return xx, yy
+
+    def draw_edge(self):
+        la = 1.0
+        fig = plt.figure()
+        xx1, yy1 = self.user_ppp(self, 0,0,la)
+        xx2, yy2 = self.user_ppp(self, 1,0,la)
+        xx3, yy3 = self.user_ppp(self, 1,1.5,la)
+        # Plotting
+        plt.scatter(xx1, yy1, edgecolor='b', facecolor='none', alpha=0.5)
+        plt.scatter(xx2, yy2, edgecolor='g', facecolor='none', alpha=0.5)
+        plt.scatter(xx3, yy3, edgecolor='r', facecolor='none', alpha=0.5)
+        # margin
+
+        ax = fig.add_subplot(111)
+        cir1 = Circle(xy=(0.0, 0.0), radius=1, alpha=0.1, color="b")
+        cir2 = Circle(xy=(1.0, 0.0), radius=1, alpha=0.1, color="g")
+        cir3 = Circle(xy=(1.0, 1.5), radius=1, alpha=0.1, color="r")
+        ax.add_patch(cir1)
+        ax.add_patch(cir2)
+        ax.add_patch(cir3)
+
+        ax.plot(0, 0, 'b*')
+        ax.plot(1, 0, 'g*')
+        ax.plot(1, 1.5, 'r*')
+
+        plt.axis('scaled')
+        plt.axis('equal')  # changes limits of x or y axis so that equal increments of x and y have the same length
+        plt.xlabel("x")
+        plt.ylabel("y")
+        plt.axis('equal')
+        plt.show()
+
 
     def step(self, action):
         last_cache = copy.deepcopy(self.edge_caching_task)
@@ -198,11 +265,17 @@ class CacheEnv(gym.Env):
         '''
         BLA
         '''
+        # BLA memory
+        if self.step_num % 25 == 0:
+            self.last_25_change_flag = copy.deepcopy(self.change_flag)
+            self.last_25_cache_flag = copy.deepcopy(self.cache_buffer_flag)
+        last_change_flag = copy.deepcopy(self.change_flag)
+        last_cache_flag = copy.deepcopy(self.cache_buffer_flag)
         self.cache_buffer_flag = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
         self.change_flag = np.zeros(shape=(self.edge_n, self.each_edge_cache_n))
         for i in range(self.edge_n):
             for j in range(self.each_edge_cache_n):
-                # 求值
+                # compute action probability
                 p_1 = self.beta_compute(self.alpha_1[i][j], self.beta_1[i][j], self.alpha_2[i][j], self.beta_2[i][j])
                 p_2 = 1 - p_1
                 # choose action
@@ -216,20 +289,23 @@ class CacheEnv(gym.Env):
                         self.cache_buffer_flag[i][j] = 0
                     else:
                         self.cache_buffer_flag[i][j] = 1
-
-                delay = self.reward_compute(self.cache_buffer_flag[i][j], self.change_flag[i][j])
-                another_delay = self.reward_compute(1 - self.cache_buffer_flag[i][j], self.cache_buffer_flag[i][j])
+                if self.step_num % 25 == 24:
+                    delay = (self.reward_compute(self.last_25_cache_flag[i][j], self.last_25_change_flag[i][j]) -
+                          self.reward_compute(self.cache_buffer_flag[i][j], self.change_flag[i][j]))
+                else:
+                    delay = (self.reward_compute(last_cache_flag[i][j], last_change_flag[i][j]) -
+                             self.reward_compute(self.cache_buffer_flag[i][j], self.change_flag[i][j]))
 
                 # update alpha, beta
                 if self.cache_buffer_flag[i][j] == 0:
-                    if delay < another_delay:
+                    if delay > 0:
                         # reward
                         self.alpha_1[i][j] += 1
                     else:
                         # penalty
                         self.beta_1[i][j] += 1
                 else:
-                    if delay < another_delay:
+                    if delay > 0:
                         # reward
                         self.alpha_2[i][j] += 1
                     else:
@@ -237,9 +313,11 @@ class CacheEnv(gym.Env):
                         self.beta_2[i][j] += 1
         done = 1
         next_obs = self.state
+        print("----------------------------")
         print("last cache:", last_cache)
         print("now caching:", self.edge_caching_task)
         print("decision:", self.cache_buffer_flag)
+        print("delay:", delay)
 
         return next_obs, reward, done, {}
 
